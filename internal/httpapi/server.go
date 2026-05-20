@@ -32,6 +32,7 @@ type Config struct {
 	Tagger      Tagger
 }
 
+var errRecommendationsNotReady = errors.New("recommendations not ready")
 var errTagSnapshotChanged = errors.New("tag snapshot changed")
 
 type Server struct {
@@ -211,12 +212,19 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request, roomID 
 	}
 
 	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+		if !readyForRecommendations(room) {
+			return domain.Room{}, errRecommendationsNotReady
+		}
 		room.Recommendations = recommend.Compute(room, 5)
 		room.Status = domain.StatusResults
 		room.Version++
 		return room, nil
 	})
 	if err != nil {
+		if errors.Is(err, errRecommendationsNotReady) {
+			writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "请等双方都筛完")
+			return
+		}
 		writeStoreError(w, err)
 		return
 	}
@@ -367,6 +375,20 @@ func validRestaurantOverride(override domain.RestaurantOverride) bool {
 	default:
 		return false
 	}
+}
+
+func readyForRecommendations(room domain.Room) bool {
+	if len(room.Participants) < 2 || len(room.Types) == 0 {
+		return false
+	}
+	for _, participant := range room.Participants {
+		for _, foodType := range room.Types {
+			if _, ok := participant.TypeVotes[foodType.ID]; !ok {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s *Server) store(w http.ResponseWriter) (roomstore.Store, bool) {

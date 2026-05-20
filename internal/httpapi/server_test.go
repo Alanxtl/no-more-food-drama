@@ -194,9 +194,24 @@ func TestTagEndpointUsesRequestLocalConfigAndRefreshesRoomState(t *testing.T) {
 	var createBody envelope
 	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
 	roomID := createBody.Data["roomId"].(string)
+	creatorID := createBody.Data["participantId"].(string)
 
 	searchBody := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
-	server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody))
+	searchRec := httptest.NewRecorder()
+	server.ServeHTTP(searchRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody))
+	searchRoom := decodeRoomResponse(t, searchRec.Body.Bytes())
+	joinRec := httptest.NewRecorder()
+	server.ServeHTTP(joinRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/join", nil))
+	var joinBody struct {
+		Data struct {
+			ParticipantID string `json:"participantId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(joinRec.Body.Bytes(), &joinBody); err != nil {
+		t.Fatalf("decode join: %v", err)
+	}
+	voteAllTypes(t, server, roomID, creatorID, searchRoom.Types)
+	voteAllTypes(t, server, roomID, joinBody.Data.ParticipantID, searchRoom.Types)
 	server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/recommendations", nil))
 
 	before, err := store.Get(context.Background(), roomID)
@@ -379,6 +394,63 @@ func TestRestaurantOverrideEndpointUpdatesHardRemove(t *testing.T) {
 	room := decodeRoomResponse(t, rec.Body.Bytes())
 	if got := room.Participants[participantID].RestaurantOverrides["amap:test-hotpot"]; got != domain.RestaurantRemove {
 		t.Fatalf("restaurant override = %q, want %q; body = %s", got, domain.RestaurantRemove, rec.Body.String())
+	}
+}
+
+func TestRecommendationsRequireBothParticipantsToFinishTypeVotes(t *testing.T) {
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
+	var createBody envelope
+	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
+	roomID := createBody.Data["roomId"].(string)
+	creatorID := createBody.Data["participantId"].(string)
+
+	joinRec := httptest.NewRecorder()
+	server.ServeHTTP(joinRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/join", nil))
+	var joinBody struct {
+		Data struct {
+			ParticipantID string `json:"participantId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(joinRec.Body.Bytes(), &joinBody); err != nil {
+		t.Fatalf("decode join: %v", err)
+	}
+	partnerID := joinBody.Data.ParticipantID
+
+	searchBody := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
+	searchRec := httptest.NewRecorder()
+	server.ServeHTTP(searchRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody))
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("search status = %d body = %s", searchRec.Code, searchRec.Body.String())
+	}
+	room := decodeRoomResponse(t, searchRec.Body.Bytes())
+	if len(room.Types) == 0 {
+		t.Fatal("search returned no types")
+	}
+
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/recommendations", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("recommendations status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	assertErrorCode(t, rec.Body.Bytes(), domain.ErrorValidation)
+
+	voteAllTypes(t, server, roomID, creatorID, room.Types)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/recommendations", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("recommendations after one participant status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	voteAllTypes(t, server, roomID, partnerID, room.Types)
+	rec = httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/recommendations", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("recommendations after both participants status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeRoomResponse(t, rec.Body.Bytes()).Status; got != domain.StatusResults {
+		t.Fatalf("status = %q, want %q", got, domain.StatusResults)
 	}
 }
 
@@ -701,6 +773,19 @@ func newTaggedSearchRoom(t *testing.T, tagger Tagger) (*Server, string) {
 		t.Fatalf("search status = %d body = %s", searchRec.Code, searchRec.Body.String())
 	}
 	return server, roomID
+}
+
+func voteAllTypes(t *testing.T, server *Server, roomID string, participantID string, types []domain.FoodType) {
+	t.Helper()
+
+	for _, foodType := range types {
+		body := bytes.NewBufferString(`{"participantId":"` + participantID + `","typeId":"` + foodType.ID + `","vote":"neutral"}`)
+		rec := httptest.NewRecorder()
+		server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/votes/type", body))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("vote %s status = %d body = %s", foodType.ID, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func serveWithoutPanic(t *testing.T, server *Server, method string, path string, body string) *httptest.ResponseRecorder {
