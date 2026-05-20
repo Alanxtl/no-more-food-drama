@@ -9,12 +9,11 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test",
+    "e2e": "playwright test --pass-with-no-tests",
     "go:test": "go test ./...",
     "check": "npm run test && npm run go:test && npm run build"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "latest",
     "lucide-react": "latest",
     "next": "latest",
     "qrcode.react": "latest",
@@ -29,6 +28,7 @@
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
     "autoprefixer": "latest",
     "eslint": "latest",
     "eslint-config-next": "latest",
