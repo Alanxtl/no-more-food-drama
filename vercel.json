@@ -3,5 +3,11 @@
     "api/*.go": {
       "runtime": "go1.x"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/rooms/:path*",
+      "destination": "/api/rooms?path=:path*"
+    }
+  ]
 }

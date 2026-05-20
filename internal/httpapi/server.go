@@ -27,18 +27,19 @@ type Config struct {
 }
 
 type Server struct {
-	config Config
-	now    func() time.Time
+	config    Config
+	now       func() time.Time
+	newRoomID func() (string, error)
 }
 
 func NewServer(config Config) *Server {
-	return &Server{config: config, now: time.Now}
+	return &Server{config: config, now: time.Now, newRoomID: randomRoomID}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	path, ok := strings.CutPrefix(r.URL.Path, "/api/rooms")
+	path, ok := roomRoutePath(r)
 	if !ok {
 		writeFailure(w, http.StatusNotFound, domain.ErrorValidation, "unknown route")
 		return
@@ -71,7 +72,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
-	roomID, err := randomRoomID()
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
+	roomID, err := s.availableRoomID(r.Context(), store)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, domain.ErrorProvider, "room creation failed")
 		return
@@ -79,7 +85,7 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 
 	shareURL := strings.TrimRight(s.config.AppURL, "/") + "/room/" + roomID
 	room, participantID := domain.NewRoom(roomID, shareURL, s.now())
-	if err := s.config.Store.Save(r.Context(), room, domain.RoomTTL); err != nil {
+	if err := store.Save(r.Context(), room, domain.RoomTTL); err != nil {
 		writeFailure(w, http.StatusInternalServerError, domain.ErrorProvider, "room creation failed")
 		return
 	}
@@ -93,7 +99,12 @@ func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, roomID string) {
-	room, err := s.config.Store.Get(r.Context(), roomID)
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
+	room, err := store.Get(r.Context(), roomID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -102,8 +113,13 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, roomID string)
 }
 
 func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request, roomID string) {
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
 	var participantID string
-	room, err := s.config.Store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
 		participantID = room.JoinPartner(s.now())
 		return room, nil
 	})
@@ -115,6 +131,11 @@ func (s *Server) joinRoom(w http.ResponseWriter, r *http.Request, roomID string)
 }
 
 func (s *Server) search(w http.ResponseWriter, r *http.Request, roomID string) {
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
 	var input struct {
 		Lat      float64 `json:"lat"`
 		Lng      float64 `json:"lng"`
@@ -126,6 +147,14 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, roomID string) {
 		return
 	}
 
+	if _, err := store.Get(r.Context(), roomID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if s.config.Restaurants == nil {
+		writeFailure(w, http.StatusBadGateway, domain.ErrorProvider, "restaurant provider is not configured")
+		return
+	}
 	restaurants, err := s.config.Restaurants.SearchAround(r.Context(), input.Lat, input.Lng, input.RadiusKM, input.Limit)
 	if err != nil {
 		writeFailure(w, http.StatusBadGateway, domain.ErrorProvider, "restaurant search failed")
@@ -133,7 +162,7 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, roomID string) {
 	}
 	tagged, types := tagging.BuildRuleTags(restaurants)
 
-	room, err := s.config.Store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
 		room.SearchConfig = &domain.SearchConfig{
 			Lat:      input.Lat,
 			Lng:      input.Lng,
@@ -155,7 +184,12 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request, roomID string) {
 }
 
 func (s *Server) recommendations(w http.ResponseWriter, r *http.Request, roomID string) {
-	room, err := s.config.Store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
+	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
 		room.Recommendations = recommend.Compute(room, 5)
 		room.Status = domain.StatusResults
 		room.Version++
@@ -166,6 +200,35 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request, roomID 
 		return
 	}
 	writeSuccess(w, map[string]any{"room": room})
+}
+
+func (s *Server) store(w http.ResponseWriter) (roomstore.Store, bool) {
+	if s.config.Store == nil {
+		writeFailure(w, http.StatusInternalServerError, domain.ErrorProvider, "room store is not configured")
+		return nil, false
+	}
+	return s.config.Store, true
+}
+
+func (s *Server) availableRoomID(ctx context.Context, store roomstore.Store) (string, error) {
+	const maxCreateIDTries = 5
+	for range maxCreateIDTries {
+		roomID, err := s.newRoomID()
+		if err != nil {
+			return "", err
+		}
+
+		_, err = store.Get(ctx, roomID)
+		switch {
+		case err == nil:
+			continue
+		case errors.Is(err, roomstore.ErrRoomNotFound), errors.Is(err, roomstore.ErrRoomExpired):
+			return roomID, nil
+		default:
+			return "", err
+		}
+	}
+	return "", errors.New("room id collision retries exhausted")
 }
 
 func writeSuccess(w http.ResponseWriter, data any) {
@@ -194,6 +257,19 @@ func splitPath(path string) []string {
 		return nil
 	}
 	return strings.Split(path, "/")
+}
+
+func roomRoutePath(r *http.Request) (string, bool) {
+	if r.URL.Path != "/api/rooms" && !strings.HasPrefix(r.URL.Path, "/api/rooms/") {
+		return "", false
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/rooms")
+	if path == "" {
+		if rewritten := r.URL.Query().Get("path"); rewritten != "" {
+			path = "/" + strings.Trim(rewritten, "/")
+		}
+	}
+	return path, true
 }
 
 func randomRoomID() (string, error) {
