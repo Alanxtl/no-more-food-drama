@@ -10,7 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "node scripts/run-e2e-if-tests.mjs",
-    "go:test": "go test ./...",
+    "go:test": "go test ./api ./internal/... ./scripts",
     "check": "npm run test && npm run go:test && npm run build"
   },
   "dependencies": {

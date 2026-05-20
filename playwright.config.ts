@@ -8,9 +8,9 @@ export default defineConfig({
     trace: "retain-on-failure"
   },
   webServer: {
-    command: "npm run dev",
-    url: "http://127.0.0.1:3000",
-    reuseExistingServer: true,
+    command: "node scripts/start-e2e-server.mjs",
+    url: "http://127.0.0.1:3003/ready",
+    reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     env: {
       USE_MOCK_PROVIDERS: "true",

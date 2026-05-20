@@ -575,8 +575,11 @@ func TestVercelConfigRewritesRoomSubroutesToFunction(t *testing.T) {
 			(rewrite.Destination == "/api/rooms" || rewrite.Destination == "/api/rooms?path=:path*") {
 			return
 		}
+		if rewrite.Source == "^/api/rooms/(.*)$" && rewrite.Destination == "/api/rooms?path=$1" {
+			return
+		}
 	}
-	t.Fatalf("missing /api/rooms/:path* rewrite in vercel.json: %s", string(data))
+	t.Fatalf("missing room subroute rewrite in vercel.json: %s", string(data))
 }
 
 func TestNilStoreRoutesReturnFailureEnvelopeWithoutPanic(t *testing.T) {

@@ -17,7 +17,7 @@ export default function RoomLobby({ roomId, shareUrl, partnerOnline }: RoomLobby
   return (
     <section className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-5 py-8">
       <div className="space-y-3">
-        <p className="text-sm font-medium text-accent">房间已创建</p>
+        <p className="text-sm font-medium text-accent">房间码</p>
         <h1 className="break-all text-4xl font-bold leading-tight text-ink">{roomId}</h1>
         <p className="text-base leading-7 text-neutral-700">
           {partnerOnline ? "另一位已加入" : "等待另一位加入"}

@@ -1,13 +1,8 @@
 {
-  "functions": {
-    "api/*.go": {
-      "runtime": "go1.x"
-    }
-  },
   "rewrites": [
     {
-      "source": "/api/rooms/:path*",
-      "destination": "/api/rooms?path=:path*"
+      "source": "^/api/rooms/(.*)$",
+      "destination": "/api/rooms?path=$1"
     }
   ]
 }
