@@ -61,6 +61,57 @@ func TestRestaurantRemoveOverrideIsStored(t *testing.T) {
 	}
 }
 
+func TestSetTypeVoteInitializesNilTypeVotes(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	room := Room{
+		Participants: map[string]Participant{
+			"p1": {},
+		},
+	}
+
+	err := room.SetTypeVote("p1", "type-japanese", VoteWant, now)
+	if err != nil {
+		t.Fatalf("SetTypeVote returned error: %v", err)
+	}
+
+	if got := room.Participants["p1"].TypeVotes["type-japanese"]; got != VoteWant {
+		t.Fatalf("vote = %q", got)
+	}
+}
+
+func TestSetRestaurantOverrideInitializesNilRestaurantOverrides(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	room := Room{
+		Participants: map[string]Participant{
+			"p1": {},
+		},
+	}
+
+	err := room.SetRestaurantOverride("p1", "restaurant-1", RestaurantRemove, now)
+	if err != nil {
+		t.Fatalf("SetRestaurantOverride returned error: %v", err)
+	}
+
+	if got := room.Participants["p1"].RestaurantOverrides["restaurant-1"]; got != RestaurantRemove {
+		t.Fatalf("override = %q", got)
+	}
+}
+
+func TestJoinPartnerInitializesNilParticipants(t *testing.T) {
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	room := Room{}
+
+	participantID := room.JoinPartner(now)
+	if participantID == "" {
+		t.Fatal("participant id is empty")
+	}
+
+	participant := room.Participants[participantID]
+	if participant.Role != RolePartner {
+		t.Fatalf("role = %q", participant.Role)
+	}
+}
+
 func TestUnknownParticipantReturnsError(t *testing.T) {
 	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
 	room, _ := NewRoom("ABC123", "https://app.test/room/ABC123", now)

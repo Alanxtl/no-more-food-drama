@@ -36,6 +36,9 @@ func NewRoom(id string, shareURL string, now time.Time) (Room, string) {
 
 func (r *Room) JoinPartner(now time.Time) string {
 	participantID := newID("p")
+	if r.Participants == nil {
+		r.Participants = map[string]Participant{}
+	}
 	r.Participants[participantID] = Participant{
 		DisplayName:         "另一位",
 		Role:                RolePartner,
@@ -64,6 +67,9 @@ func (r *Room) SetTypeVote(participantID string, typeID string, vote TypeVote, n
 	if !ok {
 		return ErrParticipantNotFound
 	}
+	if p.TypeVotes == nil {
+		p.TypeVotes = map[string]TypeVote{}
+	}
 	p.TypeVotes[typeID] = vote
 	p.LastSeenAt = now
 	r.Participants[participantID] = p
@@ -75,6 +81,9 @@ func (r *Room) SetRestaurantOverride(participantID string, restaurantID string, 
 	p, ok := r.Participants[participantID]
 	if !ok {
 		return ErrParticipantNotFound
+	}
+	if p.RestaurantOverrides == nil {
+		p.RestaurantOverrides = map[string]RestaurantOverride{}
 	}
 	p.RestaurantOverrides[restaurantID] = override
 	p.LastSeenAt = now
