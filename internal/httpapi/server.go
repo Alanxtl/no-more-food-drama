@@ -225,7 +225,7 @@ func (s *Server) typeVote(w http.ResponseWriter, r *http.Request, roomID string)
 		Vote          domain.TypeVote `json:"vote"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil ||
-		input.ParticipantID == "" || input.TypeID == "" || input.Vote == "" {
+		input.ParticipantID == "" || input.TypeID == "" || !validTypeVote(input.Vote) {
 		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "invalid type vote request")
 		return
 	}
@@ -255,7 +255,7 @@ func (s *Server) restaurantOverride(w http.ResponseWriter, r *http.Request, room
 		Override      domain.RestaurantOverride `json:"override"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil ||
-		input.ParticipantID == "" || input.RestaurantID == "" || input.Override == "" {
+		input.ParticipantID == "" || input.RestaurantID == "" || !validRestaurantOverride(input.Override) {
 		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "invalid restaurant override request")
 		return
 	}
@@ -271,6 +271,24 @@ func (s *Server) restaurantOverride(w http.ResponseWriter, r *http.Request, room
 		return
 	}
 	writeSuccess(w, map[string]any{"room": room})
+}
+
+func validTypeVote(vote domain.TypeVote) bool {
+	switch vote {
+	case domain.VoteWant, domain.VoteNeutral, domain.VoteAvoid:
+		return true
+	default:
+		return false
+	}
+}
+
+func validRestaurantOverride(override domain.RestaurantOverride) bool {
+	switch override {
+	case domain.RestaurantKeep, domain.RestaurantRemove:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) store(w http.ResponseWriter) (roomstore.Store, bool) {

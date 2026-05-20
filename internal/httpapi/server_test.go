@@ -106,8 +106,9 @@ func TestTypeVoteEndpointUpdatesParticipantVote(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("vote status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"type-hotpot":"avoid"`)) {
-		t.Fatalf("vote body missing avoid: %s", rec.Body.String())
+	room := decodeRoomResponse(t, rec.Body.Bytes())
+	if got := room.Participants[participantID].TypeVotes["type-hotpot"]; got != domain.VoteAvoid {
+		t.Fatalf("type vote = %q, want %q; body = %s", got, domain.VoteAvoid, rec.Body.String())
 	}
 }
 
@@ -128,8 +129,9 @@ func TestRestaurantOverrideEndpointUpdatesHardRemove(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("override status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"amap:test-hotpot":"remove"`)) {
-		t.Fatalf("override body missing remove: %s", rec.Body.String())
+	room := decodeRoomResponse(t, rec.Body.Bytes())
+	if got := room.Participants[participantID].RestaurantOverrides["amap:test-hotpot"]; got != domain.RestaurantRemove {
+		t.Fatalf("restaurant override = %q, want %q; body = %s", got, domain.RestaurantRemove, rec.Body.String())
 	}
 }
 
@@ -148,9 +150,15 @@ func TestVoteEndpointsValidatePayloads(t *testing.T) {
 		body string
 	}{
 		{name: "invalid type json", path: "/api/rooms/" + roomID + "/votes/type", body: `{"participantId":`},
+		{name: "missing type participant", path: "/api/rooms/" + roomID + "/votes/type", body: `{"typeId":"type-hotpot","vote":"avoid"}`},
+		{name: "missing type id", path: "/api/rooms/" + roomID + "/votes/type", body: `{"participantId":"` + participantID + `","vote":"avoid"}`},
 		{name: "missing type vote", path: "/api/rooms/" + roomID + "/votes/type", body: `{"participantId":"` + participantID + `","typeId":"type-hotpot"}`},
+		{name: "invalid type vote", path: "/api/rooms/" + roomID + "/votes/type", body: `{"participantId":"` + participantID + `","typeId":"type-hotpot","vote":"maybe"}`},
 		{name: "invalid restaurant json", path: "/api/rooms/" + roomID + "/votes/restaurant", body: `{"participantId":`},
+		{name: "missing restaurant participant", path: "/api/rooms/" + roomID + "/votes/restaurant", body: `{"restaurantId":"amap:test-hotpot","override":"remove"}`},
+		{name: "missing restaurant id", path: "/api/rooms/" + roomID + "/votes/restaurant", body: `{"participantId":"` + participantID + `","override":"remove"}`},
 		{name: "missing restaurant override", path: "/api/rooms/" + roomID + "/votes/restaurant", body: `{"participantId":"` + participantID + `","restaurantId":"amap:test-hotpot"}`},
+		{name: "invalid restaurant override", path: "/api/rooms/" + roomID + "/votes/restaurant", body: `{"participantId":"` + participantID + `","restaurantId":"amap:test-hotpot","override":"bananas"}`},
 	}
 
 	for _, tt := range tests {
@@ -174,14 +182,26 @@ func TestVoteEndpointUnknownParticipantReturnsFailureEnvelope(t *testing.T) {
 	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
 	roomID := createBody.Data["roomId"].(string)
 
-	rec := httptest.NewRecorder()
-	body := bytes.NewBufferString(`{"participantId":"missing","typeId":"type-hotpot","vote":"want"}`)
-	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/votes/type", body))
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "type vote", path: "/api/rooms/" + roomID + "/votes/type", body: `{"participantId":"missing","typeId":"type-hotpot","vote":"want"}`},
+		{name: "restaurant override", path: "/api/rooms/" + roomID + "/votes/restaurant", body: `{"participantId":"missing","restaurantId":"amap:test-hotpot","override":"remove"}`},
 	}
-	assertErrorCode(t, rec.Body.Bytes(), domain.ErrorParticipantNotFound)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tt.path, bytes.NewBufferString(tt.body)))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+			}
+			assertErrorCode(t, rec.Body.Bytes(), domain.ErrorParticipantNotFound)
+		})
+	}
 }
 
 func TestRewrittenSubroutePathJoinsExistingRoom(t *testing.T) {
@@ -342,6 +362,24 @@ type envelope struct {
 	OK    bool           `json:"ok"`
 	Data  map[string]any `json:"data"`
 	Error any            `json:"error"`
+}
+
+func decodeRoomResponse(t *testing.T, data []byte) domain.Room {
+	t.Helper()
+
+	var body struct {
+		OK   bool `json:"ok"`
+		Data struct {
+			Room domain.Room `json:"room"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &body); err != nil {
+		t.Fatalf("decode room envelope: %v", err)
+	}
+	if !body.OK {
+		t.Fatalf("ok = false, want true: %s", string(data))
+	}
+	return body.Data.Room
 }
 
 type recordingRestaurantProvider struct {
