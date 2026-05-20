@@ -20,10 +20,10 @@ func TestBuildRuleTagsGroupsRestaurantsIntoTypes(t *testing.T) {
 	assertRestaurantHasType(t, tagged, "r2", "type-hotpot")
 	assertRestaurantHasTag(t, tagged, "r3", "快速解决")
 
-	if len(types) != 3 {
+	if len(types) != 5 {
 		t.Fatalf("types length = %d", len(types))
 	}
-	if types[0].Stats.NearestMeters != 650 && types[1].Stats.NearestMeters != 650 && types[2].Stats.NearestMeters != 650 {
+	if types[0].Stats.NearestMeters != 650 && types[1].Stats.NearestMeters != 650 && types[2].Stats.NearestMeters != 650 && types[3].Stats.NearestMeters != 650 && types[4].Stats.NearestMeters != 650 {
 		t.Fatalf("expected a type with nearest distance 650m: %#v", types)
 	}
 }
@@ -38,6 +38,22 @@ func TestBuildRuleTagsUsesOtherTypeForUnknownFood(t *testing.T) {
 	assertRestaurantHasType(t, tagged, "r1", "type-other")
 	if types[0].Label != "其他好吃的" {
 		t.Fatalf("label = %q", types[0].Label)
+	}
+}
+
+func TestBuildRuleTagsAllowsMultipleRuleTypes(t *testing.T) {
+	restaurants := []domain.Restaurant{
+		{ID: "r1", Name: "东京拉面", DistanceMeters: 500, Categories: []string{"日本料理", "粉面"}},
+	}
+
+	tagged, types := BuildRuleTags(restaurants)
+
+	assertRestaurantHasType(t, tagged, "r1", "type-japanese")
+	assertRestaurantHasType(t, tagged, "r1", "type-noodles")
+	assertRestaurantHasTag(t, tagged, "r1", "清淡")
+	assertRestaurantHasTag(t, tagged, "r1", "快速解决")
+	if len(types) != 2 {
+		t.Fatalf("types length = %d", len(types))
 	}
 }
 
