@@ -41,6 +41,63 @@ func TestBuildRuleTagsUsesOtherTypeForUnknownFood(t *testing.T) {
 	}
 }
 
+func TestBuildRuleTagsAveragesRatingIgnoringMissingRatings(t *testing.T) {
+	restaurants := []domain.Restaurant{
+		{ID: "r1", Name: "热辣火锅一号", DistanceMeters: 500, Categories: []string{"火锅"}},
+		{ID: "r2", Name: "热辣火锅二号", DistanceMeters: 700, Rating: 4.6, Categories: []string{"火锅"}},
+	}
+
+	_, types := BuildRuleTags(restaurants)
+
+	hotpot := findType(t, types, "type-hotpot")
+	if hotpot.Stats.AvgRating != 4.6 {
+		t.Fatalf("AvgRating = %v", hotpot.Stats.AvgRating)
+	}
+}
+
+func TestBuildRuleTagsAveragesPriceIgnoringMissingPrices(t *testing.T) {
+	restaurants := []domain.Restaurant{
+		{ID: "r1", Name: "热辣火锅一号", DistanceMeters: 500, Categories: []string{"火锅"}},
+		{ID: "r2", Name: "热辣火锅二号", DistanceMeters: 700, AvgPriceCNY: 80, Categories: []string{"火锅"}},
+	}
+
+	_, types := BuildRuleTags(restaurants)
+
+	hotpot := findType(t, types, "type-hotpot")
+	if hotpot.Stats.AvgPriceCNY != 80 {
+		t.Fatalf("AvgPriceCNY = %v", hotpot.Stats.AvgPriceCNY)
+	}
+}
+
+func TestBuildRuleTagsDoesNotMutateInputTypeIDsAndTags(t *testing.T) {
+	typeIDs := make([]string, 1, 4)
+	typeIDs[0] = "existing-type"
+	tags := make([]string, 1, 4)
+	tags[0] = "existing-tag"
+	restaurants := []domain.Restaurant{
+		{ID: "r1", Name: "热辣火锅", DistanceMeters: 500, Categories: []string{"火锅"}, TypeIDs: typeIDs, Tags: tags},
+	}
+
+	BuildRuleTags(restaurants)
+
+	if len(restaurants[0].TypeIDs) != 1 || restaurants[0].TypeIDs[0] != "existing-type" {
+		t.Fatalf("input TypeIDs mutated: %#v", restaurants[0].TypeIDs)
+	}
+	if len(restaurants[0].Tags) != 1 || restaurants[0].Tags[0] != "existing-tag" {
+		t.Fatalf("input Tags mutated: %#v", restaurants[0].Tags)
+	}
+}
+
+func TestBuildRuleTagsDoesNotTreatUnknownDistanceAsNear(t *testing.T) {
+	restaurants := []domain.Restaurant{
+		{ID: "r1", Name: "热辣火锅", DistanceMeters: 0, Categories: []string{"火锅"}},
+	}
+
+	tagged, _ := BuildRuleTags(restaurants)
+
+	assertRestaurantDoesNotHaveTag(t, tagged, "r1", "离得近")
+}
+
 func assertRestaurantHasType(t *testing.T, restaurants []domain.Restaurant, restaurantID string, typeID string) {
 	t.Helper()
 	for _, restaurant := range restaurants {
@@ -55,6 +112,33 @@ func assertRestaurantHasType(t *testing.T, restaurants []domain.Restaurant, rest
 		t.Fatalf("restaurant %s missing type %s: %#v", restaurantID, typeID, restaurant.TypeIDs)
 	}
 	t.Fatalf("restaurant %s not found", restaurantID)
+}
+
+func assertRestaurantDoesNotHaveTag(t *testing.T, restaurants []domain.Restaurant, restaurantID string, tag string) {
+	t.Helper()
+	for _, restaurant := range restaurants {
+		if restaurant.ID != restaurantID {
+			continue
+		}
+		for _, got := range restaurant.Tags {
+			if got == tag {
+				t.Fatalf("restaurant %s has unexpected tag %s: %#v", restaurantID, tag, restaurant.Tags)
+			}
+		}
+		return
+	}
+	t.Fatalf("restaurant %s not found", restaurantID)
+}
+
+func findType(t *testing.T, types []domain.FoodType, typeID string) domain.FoodType {
+	t.Helper()
+	for _, foodType := range types {
+		if foodType.ID == typeID {
+			return foodType
+		}
+	}
+	t.Fatalf("type %s not found: %#v", typeID, types)
+	return domain.FoodType{}
 }
 
 func assertRestaurantHasTag(t *testing.T, restaurants []domain.Restaurant, restaurantID string, tag string) {

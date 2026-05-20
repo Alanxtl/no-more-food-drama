@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/Alanxtl/no-more-food-drama/internal/domain"
 )
@@ -14,6 +15,16 @@ type rule struct {
 	Keywords []string
 	Tags     []string
 }
+
+type foodTypeAggregate struct {
+	foodType    domain.FoodType
+	ratingTotal float64
+	ratingCount int
+	priceTotal  int
+	priceCount  int
+}
+
+var legacyAggregates sync.Map
 
 var foodRules = []rule{
 	{ID: "type-hotpot", Label: "火锅", Keywords: []string{"火锅", "涮", "锅"}, Tags: []string{"正餐", "重口味"}},
@@ -36,7 +47,7 @@ func BuildRuleTags(restaurants []domain.Restaurant) ([]domain.Restaurant, []doma
 		tagged[i].Tags = slices.Clone(tagged[i].Tags)
 	}
 
-	typeMap := map[string]*domain.FoodType{}
+	typeMap := map[string]*foodTypeAggregate{}
 
 	for i := range tagged {
 		text := strings.Join(append([]string{tagged[i].Name}, tagged[i].Categories...), " ")
@@ -81,12 +92,39 @@ func applyPriceAndDistanceTags(restaurant *domain.Restaurant) {
 	if restaurant.AvgPriceCNY > 0 && restaurant.AvgPriceCNY <= 40 {
 		restaurant.Tags = appendUnique(restaurant.Tags, "性价比高")
 	}
-	if restaurant.DistanceMeters <= 800 {
+	if restaurant.DistanceMeters > 0 && restaurant.DistanceMeters <= 800 {
 		restaurant.Tags = appendUnique(restaurant.Tags, "离得近")
 	}
 }
 
-func addToType(typeMap map[string]*domain.FoodType, rule rule, restaurant domain.Restaurant) {
+func addToType(typeMap any, rule rule, restaurant domain.Restaurant) {
+	switch typed := typeMap.(type) {
+	case map[string]*foodTypeAggregate:
+		addToAggregate(typed, rule, restaurant)
+	case map[string]*domain.FoodType:
+		addToDomainType(typed, rule, restaurant)
+	}
+}
+
+func addToAggregate(typeMap map[string]*foodTypeAggregate, rule rule, restaurant domain.Restaurant) {
+	aggregate, ok := typeMap[rule.ID]
+	if !ok {
+		aggregate = &foodTypeAggregate{
+			foodType: domain.FoodType{
+				ID:            rule.ID,
+				Label:         rule.Label,
+				Source:        "rules",
+				Tags:          []string{},
+				RestaurantIDs: []string{},
+				Stats:         domain.FoodTypeStats{NearestMeters: restaurant.DistanceMeters},
+			},
+		}
+		typeMap[rule.ID] = aggregate
+	}
+	updateAggregate(aggregate, rule, restaurant)
+}
+
+func addToDomainType(typeMap map[string]*domain.FoodType, rule rule, restaurant domain.Restaurant) {
 	ft, ok := typeMap[rule.ID]
 	if !ok {
 		ft = &domain.FoodType{
@@ -99,6 +137,14 @@ func addToType(typeMap map[string]*domain.FoodType, rule rule, restaurant domain
 		}
 		typeMap[rule.ID] = ft
 	}
+	aggregateValue, _ := legacyAggregates.LoadOrStore(ft, &foodTypeAggregate{foodType: *ft})
+	aggregate := aggregateValue.(*foodTypeAggregate)
+	updateAggregate(aggregate, rule, restaurant)
+	*ft = aggregate.foodType
+}
+
+func updateAggregate(aggregate *foodTypeAggregate, rule rule, restaurant domain.Restaurant) {
+	ft := &aggregate.foodType
 	ft.RestaurantIDs = appendUnique(ft.RestaurantIDs, restaurant.ID)
 	for _, tag := range rule.Tags {
 		ft.Tags = appendUnique(ft.Tags, tag)
@@ -107,20 +153,32 @@ func addToType(typeMap map[string]*domain.FoodType, rule rule, restaurant domain
 		ft.Stats.NearestMeters = restaurant.DistanceMeters
 	}
 	if restaurant.Rating > 0 {
-		totalRating := ft.Stats.AvgRating * float64(ft.Stats.Count)
-		ft.Stats.AvgRating = (totalRating + restaurant.Rating) / float64(ft.Stats.Count+1)
+		aggregate.ratingTotal += restaurant.Rating
+		aggregate.ratingCount++
+		ft.Stats.AvgRating = aggregate.ratingTotal / float64(aggregate.ratingCount)
 	}
 	if restaurant.AvgPriceCNY > 0 {
-		totalPrice := ft.Stats.AvgPriceCNY * ft.Stats.Count
-		ft.Stats.AvgPriceCNY = (totalPrice + restaurant.AvgPriceCNY) / (ft.Stats.Count + 1)
+		aggregate.priceTotal += restaurant.AvgPriceCNY
+		aggregate.priceCount++
+		ft.Stats.AvgPriceCNY = aggregate.priceTotal / aggregate.priceCount
 	}
 	ft.Stats.Count++
 }
 
-func flattenTypes(typeMap map[string]*domain.FoodType) []domain.FoodType {
-	types := make([]domain.FoodType, 0, len(typeMap))
-	for _, ft := range typeMap {
-		types = append(types, *ft)
+func flattenTypes(typeMap any) []domain.FoodType {
+	var types []domain.FoodType
+	switch typed := typeMap.(type) {
+	case map[string]*foodTypeAggregate:
+		types = make([]domain.FoodType, 0, len(typed))
+		for _, aggregate := range typed {
+			types = append(types, aggregate.foodType)
+		}
+	case map[string]*domain.FoodType:
+		types = make([]domain.FoodType, 0, len(typed))
+		for _, ft := range typed {
+			types = append(types, *ft)
+			legacyAggregates.Delete(ft)
+		}
 	}
 	sort.Slice(types, func(i, j int) bool {
 		if types[i].Stats.Count == types[j].Stats.Count {
