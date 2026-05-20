@@ -67,6 +67,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if len(parts) == 3 && r.Method == http.MethodPost && parts[1] == "votes" {
+		switch parts[2] {
+		case "type":
+			s.typeVote(w, r, parts[0])
+		case "restaurant":
+			s.restaurantOverride(w, r, parts[0])
+		default:
+			writeFailure(w, http.StatusNotFound, domain.ErrorValidation, "unknown route")
+		}
+		return
+	}
 
 	writeFailure(w, http.StatusNotFound, domain.ErrorValidation, "unknown route")
 }
@@ -202,6 +213,66 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request, roomID 
 	writeSuccess(w, map[string]any{"room": room})
 }
 
+func (s *Server) typeVote(w http.ResponseWriter, r *http.Request, roomID string) {
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
+	var input struct {
+		ParticipantID string          `json:"participantId"`
+		TypeID        string          `json:"typeId"`
+		Vote          domain.TypeVote `json:"vote"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil ||
+		input.ParticipantID == "" || input.TypeID == "" || input.Vote == "" {
+		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "invalid type vote request")
+		return
+	}
+
+	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+		if err := room.SetTypeVote(input.ParticipantID, input.TypeID, input.Vote, s.now()); err != nil {
+			return domain.Room{}, err
+		}
+		return room, nil
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeSuccess(w, map[string]any{"room": room})
+}
+
+func (s *Server) restaurantOverride(w http.ResponseWriter, r *http.Request, roomID string) {
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
+	var input struct {
+		ParticipantID string                    `json:"participantId"`
+		RestaurantID  string                    `json:"restaurantId"`
+		Override      domain.RestaurantOverride `json:"override"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil ||
+		input.ParticipantID == "" || input.RestaurantID == "" || input.Override == "" {
+		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "invalid restaurant override request")
+		return
+	}
+
+	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+		if err := room.SetRestaurantOverride(input.ParticipantID, input.RestaurantID, input.Override, s.now()); err != nil {
+			return domain.Room{}, err
+		}
+		return room, nil
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeSuccess(w, map[string]any{"room": room})
+}
+
 func (s *Server) store(w http.ResponseWriter) (roomstore.Store, bool) {
 	if s.config.Store == nil {
 		writeFailure(w, http.StatusInternalServerError, domain.ErrorProvider, "room store is not configured")
@@ -246,6 +317,8 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeFailure(w, http.StatusGone, domain.ErrorRoomExpired, "room expired")
 	case errors.Is(err, roomstore.ErrRoomNotFound):
 		writeFailure(w, http.StatusNotFound, domain.ErrorRoomNotFound, "room not found")
+	case errors.Is(err, domain.ErrParticipantNotFound):
+		writeFailure(w, http.StatusBadRequest, domain.ErrorParticipantNotFound, "participant not found")
 	default:
 		writeFailure(w, http.StatusInternalServerError, domain.ErrorProvider, "room update failed")
 	}
