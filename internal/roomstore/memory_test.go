@@ -63,3 +63,50 @@ func TestMemoryStoreUpdateRefreshesRoomTTL(t *testing.T) {
 		t.Fatalf("ShareURL = %q", got.ShareURL)
 	}
 }
+
+func TestMemoryStoreDoesNotLeakMutableRoomStateAfterSaveOrGet(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	store := NewMemoryStore()
+	store.SetNow(now)
+	room, participantID := domain.NewRoom("ABC123", "https://app.test/room/ABC123", now)
+	participant := room.Participants[participantID]
+	participant.TypeVotes["type-hotpot"] = domain.VoteWant
+	room.Participants[participantID] = participant
+	room.Restaurants = append(room.Restaurants, domain.Restaurant{ID: "restaurant-1", Name: "First"})
+
+	if err := store.Save(ctx, room, time.Hour); err != nil {
+		t.Fatalf("Save returned error: %v", err)
+	}
+	participant = room.Participants[participantID]
+	participant.TypeVotes["type-hotpot"] = domain.VoteAvoid
+	room.Participants[participantID] = participant
+	room.Restaurants[0].Name = "Mutated outside store"
+
+	got, err := store.Get(ctx, room.ID)
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if got.Participants[participantID].TypeVotes["type-hotpot"] != domain.VoteWant {
+		t.Fatalf("stored type vote was mutated through original room: %q", got.Participants[participantID].TypeVotes["type-hotpot"])
+	}
+	if got.Restaurants[0].Name != "First" {
+		t.Fatalf("stored restaurant name was mutated through original room: %q", got.Restaurants[0].Name)
+	}
+
+	participant = got.Participants[participantID]
+	participant.TypeVotes["type-hotpot"] = domain.VoteNeutral
+	got.Participants[participantID] = participant
+	got.Restaurants[0].Name = "Mutated returned room"
+
+	gotAgain, err := store.Get(ctx, room.ID)
+	if err != nil {
+		t.Fatalf("second Get returned error: %v", err)
+	}
+	if gotAgain.Participants[participantID].TypeVotes["type-hotpot"] != domain.VoteWant {
+		t.Fatalf("stored type vote was mutated through Get result: %q", gotAgain.Participants[participantID].TypeVotes["type-hotpot"])
+	}
+	if gotAgain.Restaurants[0].Name != "First" {
+		t.Fatalf("stored restaurant name was mutated through Get result: %q", gotAgain.Restaurants[0].Name)
+	}
+}

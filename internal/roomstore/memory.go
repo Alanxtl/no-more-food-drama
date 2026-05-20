@@ -43,9 +43,14 @@ func (s *MemoryStore) Save(ctx context.Context, room domain.Room, ttl time.Durat
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	room.ExpiresAt = s.nowFunc().Add(ttl)
+	cloned, err := cloneRoom(room)
+	if err != nil {
+		return err
+	}
 	s.rooms[room.ID] = memoryEntry{
-		room:      room,
-		expiresAt: s.nowFunc().Add(ttl),
+		room:      cloned,
+		expiresAt: room.ExpiresAt,
 	}
 	return nil
 }
@@ -77,9 +82,14 @@ func (s *MemoryStore) Update(ctx context.Context, roomID string, ttl time.Durati
 	if err != nil {
 		return domain.Room{}, err
 	}
+	updated.ExpiresAt = s.nowFunc().Add(ttl)
+	cloned, err := cloneRoom(updated)
+	if err != nil {
+		return domain.Room{}, err
+	}
 	s.rooms[roomID] = memoryEntry{
-		room:      updated,
-		expiresAt: s.nowFunc().Add(ttl),
+		room:      cloned,
+		expiresAt: updated.ExpiresAt,
 	}
 	return updated, nil
 }
@@ -93,5 +103,5 @@ func (s *MemoryStore) getLocked(roomID string) (domain.Room, error) {
 		delete(s.rooms, roomID)
 		return domain.Room{}, ErrRoomExpired
 	}
-	return entry.room, nil
+	return cloneRoom(entry.room)
 }

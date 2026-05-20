@@ -2,6 +2,7 @@ package roomstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -21,4 +22,16 @@ type Store interface {
 
 func roomKey(roomID string) string {
 	return "room:" + roomID
+}
+
+func cloneRoom(room domain.Room) (domain.Room, error) {
+	data, err := json.Marshal(room)
+	if err != nil {
+		return domain.Room{}, err
+	}
+	var cloned domain.Room
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return domain.Room{}, err
+	}
+	return cloned, nil
 }
