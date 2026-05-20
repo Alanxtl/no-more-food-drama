@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "e2e": "playwright test --pass-with-no-tests",
+    "e2e": "node scripts/run-e2e-if-tests.mjs",
     "go:test": "go test ./...",
     "check": "npm run test && npm run go:test && npm run build"
   },
