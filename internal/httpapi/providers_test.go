@@ -1,12 +1,51 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/Alanxtl/no-more-food-drama/internal/amap"
+	"github.com/Alanxtl/no-more-food-drama/internal/domain"
 )
+
+type recordingAmapClient struct {
+	request amap.SearchRequest
+}
+
+func (c *recordingAmapClient) SearchAround(ctx context.Context, request amap.SearchRequest) ([]domain.Restaurant, error) {
+	c.request = request
+	return []domain.Restaurant{{ID: "amap:test", Name: "测试餐厅"}}, nil
+}
+
+func TestAmapRestaurantProviderConvertsRadiusToMeters(t *testing.T) {
+	client := &recordingAmapClient{}
+	provider := AmapRestaurantProvider{Client: client}
+
+	restaurants, err := provider.SearchAround(context.Background(), 23.09, 113.32, 3, 20)
+	if err != nil {
+		t.Fatalf("SearchAround returned error: %v", err)
+	}
+
+	if len(restaurants) != 1 {
+		t.Fatalf("restaurants length = %d", len(restaurants))
+	}
+	if client.request.RadiusMeters != 3000 || client.request.Limit != 20 {
+		t.Fatalf("request = %#v", client.request)
+	}
+}
+
+func TestAmapRestaurantProviderReturnsErrorWithoutClient(t *testing.T) {
+	provider := AmapRestaurantProvider{}
+
+	_, err := provider.SearchAround(context.Background(), 23.09, 113.32, 3, 20)
+	if err == nil {
+		t.Fatal("SearchAround returned nil error, want provider configuration error")
+	}
+}
 
 func TestLLMTaggerDefaultHTTPClientHasBoundedTimeout(t *testing.T) {
 	client := LLMTagger{}.httpClient()

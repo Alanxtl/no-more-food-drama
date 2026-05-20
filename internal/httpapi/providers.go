@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Alanxtl/no-more-food-drama/internal/amap"
 	"github.com/Alanxtl/no-more-food-drama/internal/domain"
 	"github.com/Alanxtl/no-more-food-drama/internal/llm"
 )
@@ -137,6 +139,26 @@ func specialUseAddr(addr netip.Addr) bool {
 
 type LLMTagger struct {
 	HTTPClient *http.Client
+}
+
+type AmapSearchClient interface {
+	SearchAround(ctx context.Context, request amap.SearchRequest) ([]domain.Restaurant, error)
+}
+
+type AmapRestaurantProvider struct {
+	Client AmapSearchClient
+}
+
+func (p AmapRestaurantProvider) SearchAround(ctx context.Context, lat float64, lng float64, radiusKM int, limit int) ([]domain.Restaurant, error) {
+	if p.Client == nil {
+		return nil, errors.New("amap client is not configured")
+	}
+	return p.Client.SearchAround(ctx, amap.SearchRequest{
+		Lat:          lat,
+		Lng:          lng,
+		RadiusMeters: radiusKM * 1000,
+		Limit:        limit,
+	})
 }
 
 type compactRestaurant struct {
