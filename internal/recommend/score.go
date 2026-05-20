@@ -109,15 +109,23 @@ func preference(room domain.Room, restaurant domain.Restaurant) (float64, string
 	avoidCount := 0
 
 	for _, participant := range room.Participants {
+		wantsRestaurant := false
+		avoidsRestaurant := false
 		for _, typeID := range restaurant.TypeIDs {
 			switch participant.TypeVotes[typeID] {
 			case domain.VoteWant:
-				score += 15
-				wantCount++
+				wantsRestaurant = true
 			case domain.VoteAvoid:
-				score -= 16
-				avoidCount++
+				avoidsRestaurant = true
 			}
+		}
+
+		if wantsRestaurant {
+			score += 15
+			wantCount++
+		} else if avoidsRestaurant {
+			score -= 16
+			avoidCount++
 		}
 	}
 
