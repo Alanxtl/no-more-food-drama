@@ -32,11 +32,8 @@ func MergeLLMEnhancements(restaurants []domain.Restaurant, result llm.Enhancemen
 			}
 		}
 
+		merged[i].TypeIDs = cleanUnique(merged[i].TypeIDs)
 		for _, typeID := range merged[i].TypeIDs {
-			typeID = strings.TrimSpace(typeID)
-			if typeID == "" {
-				continue
-			}
 			addToType(typeMap, rule{ID: typeID, Label: labelForType(typeID), Tags: merged[i].Tags}, merged[i])
 			typeMap[typeID].foodType.Source = "mixed"
 		}

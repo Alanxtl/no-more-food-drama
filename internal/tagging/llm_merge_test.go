@@ -80,6 +80,39 @@ func TestMergeLLMEnhancementsFallsBackWhenTypeIDsAreBlank(t *testing.T) {
 	assertTagsEqual(t, merged[0].Tags, []string{"正餐", "重口味"})
 }
 
+func TestMergeLLMEnhancementsNormalizesFallbackTypeIDsBeforeAggregation(t *testing.T) {
+	restaurants := []domain.Restaurant{
+		{
+			ID: "r1", Name: "热辣火锅", DistanceMeters: 500, Rating: 4.6, AvgPriceCNY: 80,
+			TypeIDs: []string{"type-hotpot", " type-hotpot ", "type-hotpot"}, Tags: []string{"正餐"},
+		},
+	}
+	result := llm.EnhancementResult{
+		Restaurants: []llm.RestaurantEnhancement{
+			{ID: "r1", TypeIDs: []string{" ", ""}},
+		},
+	}
+
+	merged, types := MergeLLMEnhancements(restaurants, result)
+
+	if !slices.Equal(merged[0].TypeIDs, []string{"type-hotpot"}) {
+		t.Fatalf("TypeIDs = %#v", merged[0].TypeIDs)
+	}
+	hotpot := findType(t, types, "type-hotpot")
+	if !slices.Equal(hotpot.RestaurantIDs, []string{"r1"}) {
+		t.Fatalf("restaurant IDs = %#v", hotpot.RestaurantIDs)
+	}
+	if hotpot.Stats.Count != 1 {
+		t.Fatalf("count = %d", hotpot.Stats.Count)
+	}
+	if hotpot.Stats.AvgRating != 4.6 {
+		t.Fatalf("AvgRating = %v", hotpot.Stats.AvgRating)
+	}
+	if hotpot.Stats.AvgPriceCNY != 80 {
+		t.Fatalf("AvgPriceCNY = %d", hotpot.Stats.AvgPriceCNY)
+	}
+}
+
 func TestMergeLLMEnhancementsMergesDedupesTagsAndIgnoresBlanks(t *testing.T) {
 	restaurants := []domain.Restaurant{
 		{ID: "r1", Name: "热辣火锅", TypeIDs: []string{"type-hotpot"}, Tags: []string{"正餐", "离得近"}},
