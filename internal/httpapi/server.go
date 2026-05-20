@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Alanxtl/no-more-food-drama/internal/domain"
+	"github.com/Alanxtl/no-more-food-drama/internal/llm"
 	"github.com/Alanxtl/no-more-food-drama/internal/recommend"
 	"github.com/Alanxtl/no-more-food-drama/internal/roomstore"
 	"github.com/Alanxtl/no-more-food-drama/internal/tagging"
@@ -20,11 +21,18 @@ type RestaurantProvider interface {
 	SearchAround(ctx context.Context, lat float64, lng float64, radiusKM int, limit int) ([]domain.Restaurant, error)
 }
 
+type Tagger interface {
+	Enhance(ctx context.Context, restaurants []domain.Restaurant, apiKey string, baseURL string, model string) (llm.EnhancementResult, error)
+}
+
 type Config struct {
 	AppURL      string
 	Store       roomstore.Store
 	Restaurants RestaurantProvider
+	Tagger      Tagger
 }
+
+var errTagSnapshotChanged = errors.New("tag snapshot changed")
 
 type Server struct {
 	config    Config
@@ -62,6 +70,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.search(w, r, parts[0])
 		case "recommendations":
 			s.recommendations(w, r, parts[0])
+		case "tag":
+			s.tag(w, r, parts[0])
 		default:
 			writeFailure(w, http.StatusNotFound, domain.ErrorValidation, "unknown route")
 		}
@@ -207,6 +217,74 @@ func (s *Server) recommendations(w http.ResponseWriter, r *http.Request, roomID 
 		return room, nil
 	})
 	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeSuccess(w, map[string]any{"room": room})
+}
+
+func (s *Server) tag(w http.ResponseWriter, r *http.Request, roomID string) {
+	var input struct {
+		APIKey  string `json:"apiKey"`
+		BaseURL string `json:"baseUrl"`
+		Model   string `json:"model"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil ||
+		strings.TrimSpace(input.APIKey) == "" || strings.TrimSpace(input.BaseURL) == "" || strings.TrimSpace(input.Model) == "" {
+		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "LLM 配置无效")
+		return
+	}
+	apiKey := strings.TrimSpace(input.APIKey)
+	baseURL := strings.TrimSpace(input.BaseURL)
+	model := strings.TrimSpace(input.Model)
+	if !safeLLMBaseURL(baseURL) {
+		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "LLM 配置无效")
+		return
+	}
+
+	store, ok := s.store(w)
+	if !ok {
+		return
+	}
+
+	current, err := store.Get(r.Context(), roomID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if len(current.Restaurants) == 0 {
+		writeFailure(w, http.StatusBadRequest, domain.ErrorValidation, "请先搜索餐厅再生成标签")
+		return
+	}
+	if s.config.Tagger == nil {
+		writeFailure(w, http.StatusBadGateway, domain.ErrorProvider, "LLM 标签生成失败，已保留规则标签")
+		return
+	}
+	snapshotVersion := current.Version
+	result, err := s.config.Tagger.Enhance(r.Context(), current.Restaurants, apiKey, baseURL, model)
+	if err != nil {
+		writeFailure(w, http.StatusBadGateway, domain.ErrorProvider, "LLM 标签生成失败，已保留规则标签")
+		return
+	}
+
+	room, err := store.Update(r.Context(), roomID, domain.RoomTTL, func(room domain.Room) (domain.Room, error) {
+		if room.Version != snapshotVersion {
+			return domain.Room{}, errTagSnapshotChanged
+		}
+		restaurants, types := tagging.MergeLLMEnhancements(room.Restaurants, result)
+		room.Restaurants = restaurants
+		room.Types = types
+		room.Status = domain.StatusFiltering
+		room.Recommendations = []domain.Recommendation{}
+		room.Version++
+		room.ExpiresAt = s.now().Add(domain.RoomTTL)
+		return room, nil
+	})
+	if err != nil {
+		if errors.Is(err, errTagSnapshotChanged) {
+			writeFailure(w, http.StatusConflict, domain.ErrorValidation, "房间已更新，请重新生成标签")
+			return
+		}
 		writeStoreError(w, err)
 		return
 	}

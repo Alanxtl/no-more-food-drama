@@ -8,10 +8,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/Alanxtl/no-more-food-drama/internal/domain"
+	"github.com/Alanxtl/no-more-food-drama/internal/llm"
 	"github.com/Alanxtl/no-more-food-drama/internal/roomstore"
 )
 
@@ -20,6 +22,7 @@ func TestCreateAndJoinRoom(t *testing.T) {
 		AppURL:      "https://app.test",
 		Store:       roomstore.NewMemoryStore(),
 		Restaurants: FakeRestaurantProvider{},
+		Tagger:      FakeTagger{},
 	})
 
 	createReq := httptest.NewRequest(http.MethodPost, "/api/rooms", nil)
@@ -47,6 +50,7 @@ func TestSearchWritesRuleTaggedRestaurants(t *testing.T) {
 		AppURL:      "https://app.test",
 		Store:       roomstore.NewMemoryStore(),
 		Restaurants: FakeRestaurantProvider{},
+		Tagger:      FakeTagger{},
 	})
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
@@ -67,12 +71,255 @@ func TestSearchWritesRuleTaggedRestaurants(t *testing.T) {
 	}
 }
 
+func TestTagEndpointMergesLLMEnhancements(t *testing.T) {
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
+	var createBody envelope
+	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
+	roomID := createBody.Data["roomId"].(string)
+
+	searchBody := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
+	searchReq := httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody)
+	server.ServeHTTP(httptest.NewRecorder(), searchReq)
+
+	tagBody := bytes.NewBufferString(`{"apiKey":"sk-test","baseUrl":"https://api.example.com/v1","model":"deepseek-chat"}`)
+	tagReq := httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/tag", tagBody)
+	tagRec := httptest.NewRecorder()
+	server.ServeHTTP(tagRec, tagReq)
+
+	if tagRec.Code != http.StatusOK {
+		t.Fatalf("tag status = %d body = %s", tagRec.Code, tagRec.Body.String())
+	}
+	if !bytes.Contains(tagRec.Body.Bytes(), []byte("漂亮饭")) {
+		t.Fatalf("tag body missing LLM tag: %s", tagRec.Body.String())
+	}
+}
+
+func TestTagEndpointRejectsUnsafeBaseURLsWithoutCallingTagger(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+	}{
+		{name: "malformed", baseURL: "://broken"},
+		{name: "http", baseURL: "http://api.example.com/v1"},
+		{name: "userinfo", baseURL: "https://user:pass@api.example.com/v1"},
+		{name: "invalid host port", baseURL: "https://api.example.com:bad/v1"},
+		{name: "invalid loopback port", baseURL: "https://127.0.0.1:bad/v1"},
+		{name: "force query", baseURL: "https://api.example.com/v1?"},
+		{name: "localhost", baseURL: "https://localhost/v1"},
+		{name: "localhost suffix", baseURL: "https://foo.localhost/v1"},
+		{name: "loopback ipv4", baseURL: "https://127.0.0.1/v1"},
+		{name: "private ipv4", baseURL: "https://10.0.0.1/v1"},
+		{name: "unspecified ipv4", baseURL: "https://0.0.0.0/v1"},
+		{name: "link local ipv4", baseURL: "https://169.254.1.1/v1"},
+		{name: "multicast ipv4", baseURL: "https://224.0.0.1/v1"},
+		{name: "loopback ipv6", baseURL: "https://[::1]/v1"},
+		{name: "mapped ipv6 loopback", baseURL: "https://[::ffff:127.0.0.1]/v1"},
+		{name: "mapped ipv6 private", baseURL: "https://[::ffff:10.0.0.1]/v1"},
+		{name: "mapped ipv6 link local", baseURL: "https://[::ffff:169.254.1.1]/v1"},
+		{name: "scoped ipv6 link local", baseURL: "https://[fe80::1%25eth0]/v1"},
+		{name: "scoped ipv6 global", baseURL: "https://[2001:db8::1%25eth0]/v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tagger := &recordingTagger{}
+			server, roomID := newTaggedSearchRoom(t, tagger)
+
+			body := bytes.NewBufferString(`{"apiKey":"sk-test","baseUrl":"` + tt.baseURL + `","model":"deepseek-chat"}`)
+			rec := httptest.NewRecorder()
+			server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/tag", body))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+			}
+			if tagger.calls != 0 {
+				t.Fatalf("tagger calls = %d, want 0", tagger.calls)
+			}
+			assertErrorCode(t, rec.Body.Bytes(), domain.ErrorValidation)
+		})
+	}
+}
+
+func TestTagEndpointAcceptsSafeHTTPSBaseURL(t *testing.T) {
+	tagger := &recordingTagger{}
+	server, roomID := newTaggedSearchRoom(t, tagger)
+
+	body := bytes.NewBufferString(`{"apiKey":"sk-test","baseUrl":"https://api.example.com/v1","model":"deepseek-chat"}`)
+	rec := httptest.NewRecorder()
+	server.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/tag", body))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if tagger.calls != 1 {
+		t.Fatalf("tagger calls = %d, want 1", tagger.calls)
+	}
+}
+
+func TestTagEndpointRejectsEmptyRestaurantRoomWithoutCallingTagger(t *testing.T) {
+	tagger := &recordingTagger{}
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: tagger})
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
+	var createBody envelope
+	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
+	roomID := createBody.Data["roomId"].(string)
+
+	tagBody := bytes.NewBufferString(`{"apiKey":"sk-test","baseUrl":"https://api.example.com/v1","model":"deepseek-chat"}`)
+	tagRec := httptest.NewRecorder()
+	server.ServeHTTP(tagRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/tag", tagBody))
+
+	if tagRec.Code != http.StatusBadRequest {
+		t.Fatalf("tag status = %d body = %s", tagRec.Code, tagRec.Body.String())
+	}
+	if tagger.calls != 0 {
+		t.Fatalf("tagger calls = %d, want 0", tagger.calls)
+	}
+	assertErrorCode(t, tagRec.Body.Bytes(), domain.ErrorValidation)
+}
+
+func TestTagEndpointUsesRequestLocalConfigAndRefreshesRoomState(t *testing.T) {
+	now := time.Date(2026, 5, 21, 12, 0, 0, 0, time.UTC)
+	later := now.Add(10 * time.Minute)
+	store := roomstore.NewMemoryStore()
+	store.SetNow(now)
+	tagger := &recordingTagger{}
+	server := NewServer(Config{AppURL: "https://app.test", Store: store, Restaurants: FakeRestaurantProvider{}, Tagger: tagger})
+	server.now = func() time.Time { return now }
+
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
+	var createBody envelope
+	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
+	roomID := createBody.Data["roomId"].(string)
+
+	searchBody := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
+	server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody))
+	server.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/recommendations", nil))
+
+	before, err := store.Get(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get before tag: %v", err)
+	}
+	if len(before.Recommendations) == 0 {
+		t.Fatalf("expected recommendations before tag")
+	}
+
+	store.SetNow(later)
+	server.now = func() time.Time { return later }
+	tagBody := bytes.NewBufferString(`{"apiKey":"  sk-request  ","baseUrl":"  https://api.example.com/v1  ","model":"  deepseek-chat  "}`)
+	tagRec := httptest.NewRecorder()
+	server.ServeHTTP(tagRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/tag", tagBody))
+
+	if tagRec.Code != http.StatusOK {
+		t.Fatalf("tag status = %d body = %s", tagRec.Code, tagRec.Body.String())
+	}
+	if tagger.calls != 1 {
+		t.Fatalf("tagger calls = %d, want 1", tagger.calls)
+	}
+	if tagger.apiKey != "sk-request" || tagger.baseURL != "https://api.example.com/v1" || tagger.model != "deepseek-chat" {
+		t.Fatalf("tagger config = apiKey %q baseURL %q model %q", tagger.apiKey, tagger.baseURL, tagger.model)
+	}
+
+	room := decodeRoomResponse(t, tagRec.Body.Bytes())
+	if room.Status != domain.StatusFiltering {
+		t.Fatalf("status = %q, want %q", room.Status, domain.StatusFiltering)
+	}
+	if len(room.Recommendations) != 0 {
+		t.Fatalf("recommendations length = %d, want 0", len(room.Recommendations))
+	}
+	if room.Version != before.Version+1 {
+		t.Fatalf("version = %d, want %d", room.Version, before.Version+1)
+	}
+	if !room.ExpiresAt.After(before.ExpiresAt) {
+		t.Fatalf("ExpiresAt = %s, want after %s", room.ExpiresAt, before.ExpiresAt)
+	}
+
+	responseBody := tagRec.Body.String()
+	if strings.Contains(responseBody, "sk-request") ||
+		strings.Contains(responseBody, "https://api.example.com/v1") ||
+		strings.Contains(responseBody, "deepseek-chat") {
+		t.Fatalf("response leaked request-local LLM config: %s", responseBody)
+	}
+	stored, err := store.Get(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get stored room: %v", err)
+	}
+	storedJSON, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal stored room: %v", err)
+	}
+	if bytes.Contains(storedJSON, []byte("sk-request")) ||
+		bytes.Contains(storedJSON, []byte("https://api.example.com/v1")) ||
+		bytes.Contains(storedJSON, []byte("deepseek-chat")) {
+		t.Fatalf("stored room leaked request-local LLM config: %s", string(storedJSON))
+	}
+}
+
+func TestTagEndpointRejectsStaleLLMResultAfterConcurrentSearch(t *testing.T) {
+	store := roomstore.NewMemoryStore()
+	tagger := &concurrentSearchTagger{}
+	server := NewServer(Config{AppURL: "https://app.test", Store: store, Restaurants: FakeRestaurantProvider{}, Tagger: tagger})
+
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
+	var createBody envelope
+	_ = json.Unmarshal(createRec.Body.Bytes(), &createBody)
+	roomID := createBody.Data["roomId"].(string)
+
+	searchBody := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
+	searchRec := httptest.NewRecorder()
+	server.ServeHTTP(searchRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody))
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("search status = %d body = %s", searchRec.Code, searchRec.Body.String())
+	}
+	beforeTag, err := store.Get(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get before tag: %v", err)
+	}
+
+	tagger.onEnhance = func() {
+		concurrentBody := bytes.NewBufferString(`{"lat":24.01,"lng":114.02,"radiusKm":5,"limit":20}`)
+		concurrentRec := httptest.NewRecorder()
+		server.ServeHTTP(concurrentRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", concurrentBody))
+		if concurrentRec.Code != http.StatusOK {
+			t.Fatalf("concurrent search status = %d body = %s", concurrentRec.Code, concurrentRec.Body.String())
+		}
+	}
+
+	tagBody := bytes.NewBufferString(`{"apiKey":"sk-test","baseUrl":"https://api.example.com/v1","model":"deepseek-chat"}`)
+	tagRec := httptest.NewRecorder()
+	server.ServeHTTP(tagRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/tag", tagBody))
+
+	if tagRec.Code != http.StatusConflict {
+		t.Fatalf("tag status = %d body = %s", tagRec.Code, tagRec.Body.String())
+	}
+	assertErrorCode(t, tagRec.Body.Bytes(), domain.ErrorValidation)
+
+	afterTag, err := store.Get(context.Background(), roomID)
+	if err != nil {
+		t.Fatalf("get after tag: %v", err)
+	}
+	if afterTag.Version != beforeTag.Version+1 {
+		t.Fatalf("version = %d, want concurrent search version %d", afterTag.Version, beforeTag.Version+1)
+	}
+	if afterTag.SearchConfig == nil || afterTag.SearchConfig.Lat != 24.01 || afterTag.SearchConfig.Lng != 114.02 {
+		t.Fatalf("search config = %#v, want concurrent search config", afterTag.SearchConfig)
+	}
+	if restaurantHasTag(afterTag.Restaurants, "amap:test-sushi", "漂亮饭") {
+		t.Fatalf("stale LLM tag was applied after conflict: %#v", afterTag.Restaurants)
+	}
+}
+
 func TestSearchMissingRoomReturnsNotFoundWithoutCallingProvider(t *testing.T) {
 	provider := &recordingRestaurantProvider{}
 	server := NewServer(Config{
 		AppURL:      "https://app.test",
 		Store:       roomstore.NewMemoryStore(),
 		Restaurants: provider,
+		Tagger:      FakeTagger{},
 	})
 
 	body := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
@@ -90,7 +337,7 @@ func TestSearchMissingRoomReturnsNotFoundWithoutCallingProvider(t *testing.T) {
 }
 
 func TestTypeVoteEndpointUpdatesParticipantVote(t *testing.T) {
-	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}})
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
 	var createBody envelope
@@ -113,7 +360,7 @@ func TestTypeVoteEndpointUpdatesParticipantVote(t *testing.T) {
 }
 
 func TestRestaurantOverrideEndpointUpdatesHardRemove(t *testing.T) {
-	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}})
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
 	var createBody envelope
@@ -136,7 +383,7 @@ func TestRestaurantOverrideEndpointUpdatesHardRemove(t *testing.T) {
 }
 
 func TestVoteEndpointsValidatePayloads(t *testing.T) {
-	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}})
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
 	var createBody envelope
@@ -175,7 +422,7 @@ func TestVoteEndpointsValidatePayloads(t *testing.T) {
 }
 
 func TestVoteEndpointUnknownParticipantReturnsFailureEnvelope(t *testing.T) {
-	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}})
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
 	var createBody envelope
@@ -209,6 +456,7 @@ func TestRewrittenSubroutePathJoinsExistingRoom(t *testing.T) {
 		AppURL:      "https://app.test",
 		Store:       roomstore.NewMemoryStore(),
 		Restaurants: FakeRestaurantProvider{},
+		Tagger:      FakeTagger{},
 	})
 	createRec := httptest.NewRecorder()
 	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
@@ -260,7 +508,7 @@ func TestVercelConfigRewritesRoomSubroutesToFunction(t *testing.T) {
 }
 
 func TestNilStoreRoutesReturnFailureEnvelopeWithoutPanic(t *testing.T) {
-	server := NewServer(Config{AppURL: "https://app.test", Restaurants: FakeRestaurantProvider{}})
+	server := NewServer(Config{AppURL: "https://app.test", Restaurants: FakeRestaurantProvider{}, Tagger: FakeTagger{}})
 
 	tests := []struct {
 		name   string
@@ -273,6 +521,7 @@ func TestNilStoreRoutesReturnFailureEnvelopeWithoutPanic(t *testing.T) {
 		{name: "snapshot", method: http.MethodGet, path: "/api/rooms/ABC123", status: http.StatusInternalServerError},
 		{name: "join", method: http.MethodPost, path: "/api/rooms/ABC123/join", status: http.StatusInternalServerError},
 		{name: "search", method: http.MethodPost, path: "/api/rooms/ABC123/search", body: `{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`, status: http.StatusInternalServerError},
+		{name: "tag", method: http.MethodPost, path: "/api/rooms/ABC123/tag", body: `{"apiKey":"sk-test","baseUrl":"https://api.example.com/v1","model":"deepseek-chat"}`, status: http.StatusInternalServerError},
 		{name: "recommendations", method: http.MethodPost, path: "/api/rooms/ABC123/recommendations", status: http.StatusInternalServerError},
 		{name: "type vote", method: http.MethodPost, path: "/api/rooms/ABC123/votes/type", body: `{"participantId":"p1","typeId":"type-hotpot","vote":"avoid"}`, status: http.StatusInternalServerError},
 		{name: "restaurant override", method: http.MethodPost, path: "/api/rooms/ABC123/votes/restaurant", body: `{"participantId":"p1","restaurantId":"amap:test-hotpot","override":"remove"}`, status: http.StatusInternalServerError},
@@ -295,7 +544,7 @@ func TestNilRestaurantProviderSearchReturnsFailureEnvelopeWithoutPanic(t *testin
 	if err := store.Save(context.Background(), room, domain.RoomTTL); err != nil {
 		t.Fatalf("save room: %v", err)
 	}
-	server := NewServer(Config{AppURL: "https://app.test", Store: store})
+	server := NewServer(Config{AppURL: "https://app.test", Store: store, Tagger: FakeTagger{}})
 
 	rec := serveWithoutPanic(t, server, http.MethodPost, "/api/rooms/ABC123/search", `{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
 	if rec.Code != http.StatusBadGateway {
@@ -314,6 +563,7 @@ func TestCreateRetriesRoomIDCollision(t *testing.T) {
 		AppURL:      "https://app.test",
 		Store:       store,
 		Restaurants: FakeRestaurantProvider{},
+		Tagger:      FakeTagger{},
 	})
 	ids := []string{"ABC123", "DEF456"}
 	server.newRoomID = func() (string, error) {
@@ -347,6 +597,7 @@ func TestRoomsPrefixRequiresPathBoundary(t *testing.T) {
 		AppURL:      "https://app.test",
 		Store:       store,
 		Restaurants: FakeRestaurantProvider{},
+		Tagger:      FakeTagger{},
 	})
 
 	rec := httptest.NewRecorder()
@@ -389,6 +640,67 @@ type recordingRestaurantProvider struct {
 func (p *recordingRestaurantProvider) SearchAround(ctx context.Context, lat float64, lng float64, radiusKM int, limit int) ([]domain.Restaurant, error) {
 	p.calls++
 	return FakeRestaurantProvider{}.SearchAround(ctx, lat, lng, radiusKM, limit)
+}
+
+type recordingTagger struct {
+	calls   int
+	apiKey  string
+	baseURL string
+	model   string
+}
+
+func (t *recordingTagger) Enhance(ctx context.Context, restaurants []domain.Restaurant, apiKey string, baseURL string, model string) (llm.EnhancementResult, error) {
+	t.calls++
+	t.apiKey = apiKey
+	t.baseURL = baseURL
+	t.model = model
+	return FakeTagger{}.Enhance(ctx, restaurants, apiKey, baseURL, model)
+}
+
+type concurrentSearchTagger struct {
+	onEnhance func()
+}
+
+func (t *concurrentSearchTagger) Enhance(ctx context.Context, restaurants []domain.Restaurant, apiKey string, baseURL string, model string) (llm.EnhancementResult, error) {
+	if t.onEnhance != nil {
+		t.onEnhance()
+	}
+	return FakeTagger{}.Enhance(ctx, restaurants, apiKey, baseURL, model)
+}
+
+func restaurantHasTag(restaurants []domain.Restaurant, restaurantID string, tag string) bool {
+	for _, restaurant := range restaurants {
+		if restaurant.ID != restaurantID {
+			continue
+		}
+		for _, got := range restaurant.Tags {
+			if got == tag {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func newTaggedSearchRoom(t *testing.T, tagger Tagger) (*Server, string) {
+	t.Helper()
+
+	server := NewServer(Config{AppURL: "https://app.test", Store: roomstore.NewMemoryStore(), Restaurants: FakeRestaurantProvider{}, Tagger: tagger})
+	createRec := httptest.NewRecorder()
+	server.ServeHTTP(createRec, httptest.NewRequest(http.MethodPost, "/api/rooms", nil))
+	var createBody envelope
+	if err := json.Unmarshal(createRec.Body.Bytes(), &createBody); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	roomID := createBody.Data["roomId"].(string)
+
+	searchBody := bytes.NewBufferString(`{"lat":23.09,"lng":113.32,"radiusKm":3,"limit":20}`)
+	searchRec := httptest.NewRecorder()
+	server.ServeHTTP(searchRec, httptest.NewRequest(http.MethodPost, "/api/rooms/"+roomID+"/search", searchBody))
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("search status = %d body = %s", searchRec.Code, searchRec.Body.String())
+	}
+	return server, roomID
 }
 
 func serveWithoutPanic(t *testing.T, server *Server, method string, path string, body string) *httptest.ResponseRecorder {

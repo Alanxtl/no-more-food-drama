@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/Alanxtl/no-more-food-drama/internal/domain"
+	"github.com/Alanxtl/no-more-food-drama/internal/llm"
 )
 
 type FakeRestaurantProvider struct{}
@@ -48,4 +49,14 @@ func (FakeRestaurantProvider) SearchAround(ctx context.Context, lat float64, lng
 		return restaurants[:limit], nil
 	}
 	return restaurants, nil
+}
+
+type FakeTagger struct{}
+
+func (FakeTagger) Enhance(ctx context.Context, restaurants []domain.Restaurant, apiKey string, baseURL string, model string) (llm.EnhancementResult, error) {
+	return llm.EnhancementResult{
+		Restaurants: []llm.RestaurantEnhancement{
+			{ID: "amap:test-sushi", TypeIDs: []string{"type-japanese"}, Tags: []string{"漂亮饭", "约会友好"}},
+		},
+	}, nil
 }

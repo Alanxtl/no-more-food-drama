@@ -20,6 +20,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			AppURL:      env("NEXT_PUBLIC_APP_URL", "http://localhost:3000"),
 			Store:       roomstore.NewMemoryStore(),
 			Restaurants: httpapi.FakeRestaurantProvider{},
+			Tagger:      httpapi.LLMTagger{},
 		})
 	})
 	server.ServeHTTP(w, r)
