@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -86,5 +87,120 @@ func TestSearchAroundReturnsAmapStatusError(t *testing.T) {
 	client := NewClient("bad-key", server.URL, server.Client())
 	if _, err := client.SearchAround(context.Background(), SearchRequest{}); err == nil {
 		t.Fatal("SearchAround returned nil error")
+	}
+}
+
+func TestSearchAroundReturnsHTTPStatusErrorBeforeDecodingSuccessBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"status":"1","pois":[]}`, http.StatusBadGateway)
+	}))
+	defer server.Close()
+
+	client := NewClient("amap-key", server.URL, server.Client())
+	if _, err := client.SearchAround(context.Background(), SearchRequest{Limit: 20}); err == nil {
+		t.Fatal("SearchAround returned nil error")
+	}
+}
+
+func TestSearchAroundMapsAddressArray(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status":"1",
+			"pois":[
+				{
+					"id":"B0FFARRAY",
+					"name":"街角小馆",
+					"address":["海珠区", "测试路 2 号"],
+					"location":"113.330000,23.100000",
+					"distance":"300",
+					"type":"餐饮服务"
+				}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("amap-key", server.URL, server.Client())
+	restaurants, err := client.SearchAround(context.Background(), SearchRequest{Limit: 20})
+	if err != nil {
+		t.Fatalf("SearchAround returned error: %v", err)
+	}
+
+	if len(restaurants) != 1 {
+		t.Fatalf("restaurants length = %d", len(restaurants))
+	}
+	if restaurants[0].Address != "海珠区 测试路 2 号" {
+		t.Fatalf("address = %q", restaurants[0].Address)
+	}
+}
+
+func TestSearchAroundSkipsInvalidLocationPOIs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status":"1",
+			"pois":[
+				{"id":"bad","name":"Bad","address":"bad","location":"not-a-coordinate","distance":"10","type":"餐饮服务"},
+				{"id":"good","name":"Good","address":"good","location":"113.340000,23.110000","distance":"20","type":"餐饮服务"}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("amap-key", server.URL, server.Client())
+	restaurants, err := client.SearchAround(context.Background(), SearchRequest{Limit: 20})
+	if err != nil {
+		t.Fatalf("SearchAround returned error: %v", err)
+	}
+
+	if len(restaurants) != 1 {
+		t.Fatalf("restaurants length = %d: %#v", len(restaurants), restaurants)
+	}
+	if restaurants[0].ProviderID != "good" || restaurants[0].Lat == 0 || restaurants[0].Lng == 0 {
+		t.Fatalf("restaurant = %#v", restaurants[0])
+	}
+}
+
+func TestSearchAroundClampsPageSize(t *testing.T) {
+	var pageSizes []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pageSizes = append(pageSizes, r.URL.Query().Get("page_size"))
+		_, _ = w.Write([]byte(`{"status":"1","pois":[]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("amap-key", server.URL, server.Client())
+	for _, limit := range []int{0, 100} {
+		if _, err := client.SearchAround(context.Background(), SearchRequest{Limit: limit}); err != nil {
+			t.Fatalf("SearchAround(%d) returned error: %v", limit, err)
+		}
+	}
+
+	if strings.Join(pageSizes, ",") != "20,25" {
+		t.Fatalf("page sizes = %#v", pageSizes)
+	}
+}
+
+func TestSearchAroundTrimsEmptyCategories(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"status":"1",
+			"pois":[
+				{"id":"B0FFCATS","name":"分类小馆","address":"测试路","location":"113.350000,23.120000","distance":"10","type":" 餐饮服务 ; ; 火锅 ; "}
+			]
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient("amap-key", server.URL, server.Client())
+	restaurants, err := client.SearchAround(context.Background(), SearchRequest{Limit: 20})
+	if err != nil {
+		t.Fatalf("SearchAround returned error: %v", err)
+	}
+
+	if len(restaurants) != 1 {
+		t.Fatalf("restaurants length = %d", len(restaurants))
+	}
+	if len(restaurants[0].Categories) != 2 || restaurants[0].Categories[0] != "餐饮服务" || restaurants[0].Categories[1] != "火锅" {
+		t.Fatalf("categories = %#v", restaurants[0].Categories)
 	}
 }

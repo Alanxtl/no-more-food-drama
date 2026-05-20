@@ -90,3 +90,43 @@ func TestEnhanceTagsReturnsErrorForHTTPFailure(t *testing.T) {
 		t.Fatal("EnhanceTags returned nil error")
 	}
 }
+
+func TestEnhanceTagsParsesFencedJSONContent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"content": "```json\n{\"restaurants\":[{\"id\":\"r1\",\"typeIds\":[\"type-hotpot\"],\"tags\":[\"重口味\"]}]}\n```"}},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "user-key", "deepseek-chat", server.Client())
+	result, err := client.EnhanceTags(context.Background(), `{}`)
+	if err != nil {
+		t.Fatalf("EnhanceTags returned error: %v", err)
+	}
+
+	if len(result.Restaurants) != 1 || result.Restaurants[0].ID != "r1" {
+		t.Fatalf("result = %#v", result)
+	}
+	if len(result.Restaurants[0].Tags) != 1 || result.Restaurants[0].Tags[0] != "重口味" {
+		t.Fatalf("tags = %#v", result.Restaurants[0].Tags)
+	}
+}
+
+func TestEnhanceTagsReturnsErrorForNon2xxHTTPStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMultipleChoices)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"restaurants\":[]}"}}]}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "user-key", "deepseek-chat", server.Client())
+	if _, err := client.EnhanceTags(context.Background(), `{}`); err == nil {
+		t.Fatal("EnhanceTags returned nil error")
+	}
+}

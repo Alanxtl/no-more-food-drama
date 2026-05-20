@@ -69,7 +69,7 @@ func (c *Client) EnhanceTags(ctx context.Context, compactRestaurantJSON string) 
 	}
 	defer response.Body.Close()
 
-	if response.StatusCode >= http.StatusBadRequest {
+	if response.StatusCode < http.StatusOK || response.StatusCode > http.StatusMultipleChoices-1 {
 		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 		return EnhancementResult{}, fmt.Errorf("llm request failed with status %d: %s", response.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
@@ -83,10 +83,25 @@ func (c *Client) EnhanceTags(ctx context.Context, compactRestaurantJSON string) 
 	}
 
 	var result EnhancementResult
-	if err := json.Unmarshal([]byte(decoded.Choices[0].Message.Content), &result); err != nil {
+	if err := json.Unmarshal([]byte(stripJSONFence(decoded.Choices[0].Message.Content)), &result); err != nil {
 		return EnhancementResult{}, err
 	}
 	return result, nil
+}
+
+func stripJSONFence(content string) string {
+	content = strings.TrimSpace(content)
+	if !strings.HasPrefix(content, "```") {
+		return content
+	}
+
+	content = strings.TrimPrefix(content, "```")
+	if newline := strings.IndexByte(content, '\n'); newline >= 0 {
+		content = content[newline+1:]
+	}
+	content = strings.TrimSpace(content)
+	content = strings.TrimSuffix(content, "```")
+	return strings.TrimSpace(content)
 }
 
 type chatRequest struct {
