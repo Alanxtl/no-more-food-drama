@@ -5,6 +5,7 @@ const config = [
   {
     ignores: [
       ".next/**",
+      ".worktrees/**",
       "node_modules/**",
       "coverage/**",
       "test-results/**",
